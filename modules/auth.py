@@ -6,6 +6,7 @@ import getpass
 from .config import MASTER_PASSWORD_FILE, SECURE_FOLDER
 from .utils import set_secure_permissions
 
+
 def check_or_create_master_password():
     """
     Checks for existing master password hash. If not present, creates one.

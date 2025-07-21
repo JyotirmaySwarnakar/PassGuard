@@ -1,7 +1,13 @@
-def copy_to_clipboard(text):
-    import pyperclip
-    pyperclip.copy(text)
+import threading
+import pyperclip
 
-def get_from_clipboard():
-    import pyperclip
-    return pyperclip.paste()
+def clear_clipboard():
+    pyperclip.copy('')
+    print("[Clipboard] Clipboard cleared.")
+
+def copy_to_clipboard(text, clear_after=15):
+    pyperclip.copy(text)
+    print(f"[Clipboard] Password copied to clipboard. It will be cleared in {clear_after} seconds.")
+    timer = threading.Timer(clear_after, clear_clipboard)
+    timer.daemon = True
+    timer.start()
