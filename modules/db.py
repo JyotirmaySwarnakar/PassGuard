@@ -23,6 +23,8 @@ def initialize_db():
         set_secure_permissions(DATABASE_FILE)
 
 def add_credential(service, username, password):
+    if not service.strip() or not username.strip() or not password.strip():
+        raise ValueError("Service, username, and password cannot be empty.")
     conn = sqlite3.connect(DATABASE_FILE)
     c = conn.cursor()
     c.execute('''
@@ -39,3 +41,33 @@ def get_credentials():
     records = c.fetchall()
     conn.close()
     return [(s, decrypt_data(u), decrypt_data(p)) for s, u, p in records]
+
+def edit_credential(index, new_service, new_username, new_password):
+    conn = sqlite3.connect(DATABASE_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id FROM credentials')
+    ids = [row[0] for row in c.fetchall()]
+    if index < 1 or index > len(ids):
+        conn.close()
+        raise IndexError("Invalid credential index.")
+    cred_id = ids[index - 1]
+    c.execute('''
+        UPDATE credentials
+        SET service = ?, username = ?, password = ?
+        WHERE id = ?
+    ''', (new_service, encrypt_data(new_username), encrypt_data(new_password), cred_id))
+    conn.commit()
+    conn.close()
+
+def remove_credential(index):
+    conn = sqlite3.connect(DATABASE_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id FROM credentials')
+    ids = [row[0] for row in c.fetchall()]
+    if index < 1 or index > len(ids):
+        conn.close()
+        raise IndexError("Invalid credential index.")
+    cred_id = ids[index - 1]
+    c.execute('DELETE FROM credentials WHERE id = ?', (cred_id,))
+    conn.commit()
+    conn.close()

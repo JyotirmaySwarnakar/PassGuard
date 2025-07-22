@@ -5,7 +5,7 @@ import getpass
 import signal
 from modules.config import MASTER_PASSWORD_FILE, SECURE_FOLDER
 from modules.auth import check_or_create_master_password
-from modules.db import initialize_db, add_credential, get_credentials
+from modules.db import initialize_db, add_credential, get_credentials, edit_credential, remove_credential
 from modules.session import SessionManager
 from modules.clipboard_utils import copy_to_clipboard
 
@@ -23,7 +23,6 @@ def timed_input(prompt, timeout):
         signal.alarm(0)
         return value
     except TimeoutException:
-        # Do not print here, let main handle the message
         return None
     finally:
         signal.alarm(0)
@@ -36,13 +35,22 @@ def timed_getpass(prompt, timeout):
         signal.alarm(0)
         return value
     except TimeoutException:
-        # Do not print here, let main handle the message
         return None
     finally:
         signal.alarm(0)
 
 def clear_screen():
     os.system("clear")
+
+def filter_credentials(credentials, query):
+    if not query:
+        return credentials
+    query = query.lower()
+    return [
+        (service, username, password)
+        for (service, username, password) in credentials
+        if query in service.lower()
+    ]
 
 def main():
     os.makedirs(SECURE_FOLDER, exist_ok=True)
@@ -66,8 +74,8 @@ def main():
             continue
 
         print("\n==== Local Password Manager ====")
-        print("1. Add credential")
-        print("2. View credentials")
+        print("1. View credentials")
+        print("2. Add credential")
         print("3. Exit")
 
         choice = timed_input("Select an option: ", session.timeout)
@@ -77,6 +85,121 @@ def main():
         session.refresh()
 
         if choice == "1":
+            while True:
+                all_credentials = get_credentials()
+                if not all_credentials:
+                    print("No credentials stored yet.")
+                    break
+
+                search_query = timed_input("Search for service (Hit ENTER for view all): ", session.timeout)
+                if search_query is None:
+                    session.lock()
+                    break
+                filtered_credentials = filter_credentials(all_credentials, search_query.strip())
+                if not filtered_credentials:
+                    print("No matching credentials found.")
+                    continue
+
+                print("\n🔐 Matching Credentials:")
+                for idx, (service, username, _) in enumerate(filtered_credentials, 1):
+                    print(f"{idx}. {service} - {username}")
+                print("\nOptions:")
+                print("0. Copy password")
+                print("1. Edit credential")
+                print("2. Remove credential")
+                print("3. Back to main menu")
+                sub_choice = timed_input("Choose an option: ", session.timeout)
+                if sub_choice is None:
+                    session.lock()
+                    break
+                if sub_choice == "3":
+                    break
+                elif sub_choice == "0":
+                    sel = timed_input("Enter the number of the credential to copy password: ", session.timeout)
+                    if sel is None:
+                        session.lock()
+                        break
+                    try:
+                        sel = int(sel)
+                        if 1 <= sel <= len(filtered_credentials):
+                            _, _, password = filtered_credentials[sel - 1]
+                            copy_to_clipboard(password)
+                        else:
+                            print("Invalid selection.")
+                    except ValueError:
+                        print("Invalid input.")
+                elif sub_choice == "1":
+                    sel = timed_input("Enter the number of the credential to edit: ", session.timeout)
+                    if sel is None:
+                        session.lock()
+                        break
+                    try:
+                        sel = int(sel)
+                        if 1 <= sel <= len(filtered_credentials):
+                            # Find the index in the full credentials list
+                            cred = filtered_credentials[sel - 1]
+                            idx_in_all = all_credentials.index(cred)
+                            old_service, old_username, old_password = cred
+                            print(f"Editing credential #{sel}:")
+                            print(f"Service Name [Hit Enter to keep original \"{old_service}\" ]: ", end="")
+                            new_service = timed_input("", session.timeout)
+                            if new_service is None:
+                                session.lock()
+                                break
+                            new_service = new_service.strip() or old_service
+                            print(f"Username [Hit Enter to keep orginal \"{old_username}\" ]: ", end="")
+                            new_username = timed_input("", session.timeout)
+                            if new_username is None:
+                                session.lock()
+                                break
+                            new_username = new_username.strip() or old_username
+                            print(f"Password [Hit Enter to keep original]: ", end="")
+                            new_password = timed_getpass("Password [Hit Enter to keep original]: ", session.timeout)
+                            if new_password is None:
+                                session.lock()
+                                break
+                            new_password = new_password.strip() or old_password
+                            if not new_service.strip() or not new_username.strip() or not new_password.strip():
+                                print("❌ Service, username, and password cannot be empty.")
+                                continue
+                            confirm = timed_input("Press ENTER to confirm update, or Ctrl+C to cancel: ", session.timeout)
+                            if confirm is None:
+                                session.lock()
+                                break
+                            edit_credential(idx_in_all + 1, new_service, new_username, new_password)
+                            print("[✓] Credential updated.")
+                        else:
+                            print("Invalid selection.")
+                    except ValueError:
+                        print("Invalid input.")
+                    except IndexError as e:
+                        print(f"❌ {e}")
+                elif sub_choice == "2":
+                    sel = timed_input("Enter the number of the credential to remove: ", session.timeout)
+                    if sel is None:
+                        session.lock()
+                        break
+                    try:
+                        sel = int(sel)
+                        if 1 <= sel <= len(filtered_credentials):
+                            cred = filtered_credentials[sel - 1]
+                            idx_in_all = all_credentials.index(cred)
+                            confirm = timed_input("Press ENTER to confirm deletion, or Ctrl+C to cancel: ", session.timeout)
+                            if confirm is None:
+                                session.lock()
+                                break
+                            remove_credential(idx_in_all + 1)
+                            print("[✓] Credential removed.")
+                        else:
+                            print("Invalid selection.")
+                    except ValueError:
+                        print("Invalid input.")
+                    except IndexError as e:
+                        print(f"❌ {e}")
+                else:
+                    print("Invalid option. Please try again.")
+
+        elif choice == "2":
             service = timed_input("🔹 Service Name: ", session.timeout)
             if service is None:
                 session.lock()
@@ -89,32 +212,18 @@ def main():
             if password is None:
                 session.lock()
                 continue
-            add_credential(service, username, password)
-            print("[✓] Credential saved securely.")
-
-        elif choice == "2":
-            print("\n🔐 Saved Credentials:")
-            credentials = get_credentials()
-            for idx, (service, username, password) in enumerate(credentials, 1):
-                print(f"{idx}. {service} - {username} - [Hidden]")
-            if credentials:
-                sel = timed_input("Enter the number of the credential to copy password (or 0 to skip): ", session.timeout)
-                if sel is None:
-                    session.lock()
-                    continue
-                try:
-                    sel = int(sel)
-                    if 1 <= sel <= len(credentials):
-                        _, _, password = credentials[sel - 1]
-                        copy_to_clipboard(password)
-                    elif sel == 0:
-                        pass
-                    else:
-                        print("Invalid selection.")
-                except ValueError:
-                    print("Invalid input.")
-            else:
-                print("No credentials stored yet.")
+            if not service.strip() or not username.strip() or not password.strip():
+                print("❌ Service, username, and password cannot be empty.")
+                continue
+            confirm = timed_input("Are you sure you want to save this credential? (y/n): ", session.timeout)
+            if confirm is None or confirm.lower() != "y":
+                print("Cancelled.")
+                continue
+            try:
+                add_credential(service, username, password)
+                print("[✓] Credential saved securely.")
+            except ValueError as ve:
+                print(f"❌ {ve}")
 
         elif choice == "3":
             print("Goodbye!")
