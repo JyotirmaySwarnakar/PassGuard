@@ -2,7 +2,7 @@ import time
 import threading
 
 class SessionManager:
-    def __init__(self, timeout_seconds=10):
+    def __init__(self, timeout_seconds=20):
         self.timeout = timeout_seconds
         self.locked = False
         self._timer = None
@@ -22,7 +22,7 @@ class SessionManager:
 
     def lock(self):
         self.locked = True
-        print("\n[SessionManager] Session timed out. Please re-authenticate.")
+        # Do not print here; let main handle the message
 
     def is_locked(self):
         return self.locked

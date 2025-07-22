@@ -2,31 +2,63 @@
 
 import os
 import getpass
+import signal
 from modules.config import MASTER_PASSWORD_FILE, SECURE_FOLDER
 from modules.auth import check_or_create_master_password
 from modules.db import initialize_db, add_credential, get_credentials
 from modules.session import SessionManager
 from modules.clipboard_utils import copy_to_clipboard
 
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException
+
+def timed_input(prompt, timeout):
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout)
+    try:
+        value = input(prompt)
+        signal.alarm(0)
+        return value
+    except TimeoutException:
+        # Do not print here, let main handle the message
+        return None
+    finally:
+        signal.alarm(0)
+
+def timed_getpass(prompt, timeout):
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout)
+    try:
+        value = getpass.getpass(prompt)
+        signal.alarm(0)
+        return value
+    except TimeoutException:
+        # Do not print here, let main handle the message
+        return None
+    finally:
+        signal.alarm(0)
+
+def clear_screen():
+    os.system("clear")
+
 def main():
-    # Create the secure folder if it doesn't exist
     os.makedirs(SECURE_FOLDER, exist_ok=True)
 
-    # Step 1: Authenticate user
     if not check_or_create_master_password():
-        return  # Exit if auth fails
+        return
 
-    # Step 2: Initialize the encrypted database
     initialize_db()
 
-    # Step 3: Start session manager
-    session = SessionManager(timeout_seconds=300)  # 5 minutes session timeout
+    session = SessionManager(timeout_seconds=180)  # 3 minutes
     session.refresh()
 
-    # Step 4: Menu loop
     while True:
         if session.is_locked():
-            print("Session timed out. Please log in again.")
+            clear_screen()
+            print("[SessionManager] Session timed out. Please re-authenticate.\n")
             if not check_or_create_master_password():
                 print("Exiting for security.")
                 break
@@ -38,13 +70,25 @@ def main():
         print("2. View credentials")
         print("3. Exit")
 
-        choice = input("Select an option: ").strip()
-        session.refresh()  # Reset session timer on every action
+        choice = timed_input("Select an option: ", session.timeout)
+        if choice is None:
+            session.lock()
+            continue
+        session.refresh()
 
         if choice == "1":
-            service = input("🔹 Service Name: ").strip()
-            username = input("👤 Username: ").strip()
-            password = getpass.getpass("🔑 Password: ").strip()  # hidden input
+            service = timed_input("🔹 Service Name: ", session.timeout)
+            if service is None:
+                session.lock()
+                continue
+            username = timed_input("👤 Username: ", session.timeout)
+            if username is None:
+                session.lock()
+                continue
+            password = timed_getpass("🔑 Password: ", session.timeout)
+            if password is None:
+                session.lock()
+                continue
             add_credential(service, username, password)
             print("[✓] Credential saved securely.")
 
@@ -54,8 +98,12 @@ def main():
             for idx, (service, username, password) in enumerate(credentials, 1):
                 print(f"{idx}. {service} - {username} - [Hidden]")
             if credentials:
+                sel = timed_input("Enter the number of the credential to copy password (or 0 to skip): ", session.timeout)
+                if sel is None:
+                    session.lock()
+                    continue
                 try:
-                    sel = int(input("Enter the number of the credential to copy password (or 0 to skip): "))
+                    sel = int(sel)
                     if 1 <= sel <= len(credentials):
                         _, _, password = credentials[sel - 1]
                         copy_to_clipboard(password)
