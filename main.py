@@ -8,6 +8,7 @@ from modules.auth import check_or_create_master_password
 from modules.db import initialize_db, add_credential, get_credentials, edit_credential, remove_credential
 from modules.session import SessionManager
 from modules.clipboard_utils import copy_to_clipboard
+from modules.json_io import export_credentials_json, import_credentials_json
 
 class TimeoutException(Exception):
     pass
@@ -76,7 +77,10 @@ def main():
         print("\n==== Local Password Manager ====")
         print("1. View credentials")
         print("2. Add credential")
-        print("3. Exit")
+        print("3. Export credentials (JSON, encrypted)")
+        print("4. Import credentials (JSON, encrypted)")
+        print("5. Settings")
+        print("6. Exit")
 
         choice = timed_input("Select an option: ", session.timeout)
         if choice is None:
@@ -226,6 +230,69 @@ def main():
                 print(f"❌ {ve}")
 
         elif choice == "3":
+            path = timed_input("Export file path: ", session.timeout)
+            if path:
+                export_credentials_json(path.strip())
+        elif choice == "4":
+            path = timed_input("Import file path: ", session.timeout)
+            if path:
+                import_credentials_json(path.strip())
+        elif choice == "5":
+            while True:
+                print("\n--- Settings ---")
+                print("1. Change session timeout")
+                print("2. Change master password")
+                print("3. Back to main menu")
+                setting_choice = timed_input("Select an option: ", session.timeout)
+                if setting_choice is None or setting_choice == "3":
+                    break
+                elif setting_choice == "1":
+                    new_timeout = timed_input("Enter new session timeout in seconds (current: {}): ".format(session.timeout), session.timeout)
+                    if new_timeout is None:
+                        print("Cancelled.")
+                        continue
+                    try:
+                        new_timeout = int(new_timeout)
+                        if new_timeout < 30 or new_timeout > 3600:
+                            print("❌ Timeout must be between 30 and 3600 seconds.")
+                            continue
+                        session.timeout = new_timeout
+                        session.refresh()
+                        print(f"[✓] Session timeout updated to {new_timeout} seconds.")
+                    except ValueError:
+                        print("❌ Invalid input. Please enter a number.")
+                elif setting_choice == "2":
+                    print("Change master password:")
+                    from modules.auth import MASTER_PASSWORD_FILE
+                    import bcrypt
+                    import getpass
+                    # Authenticate old password
+                    with open(MASTER_PASSWORD_FILE, "rb") as f:
+                        stored_hash = f.read()
+                    for _ in range(3):
+                        old_pw = getpass.getpass("Enter current master password: ")
+                        if bcrypt.checkpw(old_pw.encode(), stored_hash):
+                            break
+                        else:
+                            print("❌ Incorrect password.")
+                    else:
+                        print("❌ Too many failed attempts.")
+                        continue
+                    # Set new password
+                    while True:
+                        new_pw = getpass.getpass("Enter new master password: ")
+                        confirm_pw = getpass.getpass("Confirm new master password: ")
+                        if new_pw == confirm_pw:
+                            break
+                        print("Passwords do not match. Try again.")
+                    hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt())
+                    with open(MASTER_PASSWORD_FILE, "wb") as f:
+                        f.write(hashed)
+                    print("[✓] Master password changed.")
+                else:
+                    print("Invalid option. Please try again.")
+
+        elif choice == "6":
             print("Goodbye!")
             session.stop()
             break
