@@ -9,6 +9,8 @@ from modules.db import initialize_db, add_credential, get_credentials, edit_cred
 from modules.session import SessionManager
 from modules.clipboard_utils import copy_to_clipboard
 from modules.json_io import export_credentials_json, import_credentials_json
+from modules.totp_utils import get_or_create_totp_secret, verify_totp
+from modules.utils import load_session_timeout, save_session_timeout
 
 class TimeoutException(Exception):
     pass
@@ -55,13 +57,12 @@ def filter_credentials(credentials, query):
 
 def main():
     os.makedirs(SECURE_FOLDER, exist_ok=True)
-
     if not check_or_create_master_password():
         return
-
     initialize_db()
 
-    session = SessionManager(timeout_seconds=180)  # 3 minutes
+    session_timeout = load_session_timeout(default=180)
+    session = SessionManager(timeout_seconds=session_timeout)
     session.refresh()
 
     while True:
@@ -77,10 +78,9 @@ def main():
         print("\n==== Local Password Manager ====")
         print("1. View credentials")
         print("2. Add credential")
-        print("3. Export credentials (JSON, encrypted)")
-        print("4. Import credentials (JSON, encrypted)")
-        print("5. Settings")
-        print("6. Exit")
+        print("3. Import/Export credentials")
+        print("4. Settings")
+        print("5. Exit")
 
         choice = timed_input("Select an option: ", session.timeout)
         if choice is None:
@@ -230,21 +230,33 @@ def main():
                 print(f"❌ {ve}")
 
         elif choice == "3":
-            path = timed_input("Export file path: ", session.timeout)
-            if path:
-                export_credentials_json(path.strip())
+            while True:
+                print("\n--- Import/Export Credentials ---")
+                print("1. Export credentials (JSON, encrypted)")
+                print("2. Import credentials (JSON, encrypted)")
+                print("3. Back to main menu")
+                ie_choice = timed_input("Select an option: ", session.timeout)
+                if ie_choice is None or ie_choice == "3":
+                    break
+                elif ie_choice == "1":
+                    path = timed_input("Export file path: ", session.timeout)
+                    if path:
+                        export_credentials_json(path.strip())
+                elif ie_choice == "2":
+                    path = timed_input("Import file path: ", session.timeout)
+                    if path:
+                        import_credentials_json(path.strip())
+                else:
+                    print("Invalid option. Please try again.")
         elif choice == "4":
-            path = timed_input("Import file path: ", session.timeout)
-            if path:
-                import_credentials_json(path.strip())
-        elif choice == "5":
             while True:
                 print("\n--- Settings ---")
                 print("1. Change session timeout")
                 print("2. Change master password")
-                print("3. Back to main menu")
+                print("3. 2FA settings")
+                print("4. Back to main menu")
                 setting_choice = timed_input("Select an option: ", session.timeout)
-                if setting_choice is None or setting_choice == "3":
+                if setting_choice is None or setting_choice == "4":
                     break
                 elif setting_choice == "1":
                     new_timeout = timed_input("Enter new session timeout in seconds (current: {}): ".format(session.timeout), session.timeout)
@@ -258,6 +270,7 @@ def main():
                             continue
                         session.timeout = new_timeout
                         session.refresh()
+                        save_session_timeout(new_timeout)
                         print(f"[✓] Session timeout updated to {new_timeout} seconds.")
                     except ValueError:
                         print("❌ Invalid input. Please enter a number.")
@@ -278,6 +291,19 @@ def main():
                     else:
                         print("❌ Too many failed attempts.")
                         continue
+                    # TOTP 2FA
+                    secret = get_or_create_totp_secret()
+                    print("[!] Enter your 2FA code from your authenticator app.")
+                    for _ in range(3):
+                        code = timed_input("2FA code: ", session.timeout)
+                        if code and verify_totp(code):
+                            print("[✓] 2FA verified.")
+                            break
+                        else:
+                            print("❌ Invalid 2FA code.")
+                    else:
+                        print("❌ Too many failed 2FA attempts.")
+                        continue
                     # Set new password
                     while True:
                         new_pw = getpass.getpass("Enter new master password: ")
@@ -289,14 +315,56 @@ def main():
                     with open(MASTER_PASSWORD_FILE, "wb") as f:
                         f.write(hashed)
                     print("[✓] Master password changed.")
-                else:
-                    print("Invalid option. Please try again.")
-
-        elif choice == "6":
+                elif setting_choice == "3":
+                    from modules.totp_utils import is_totp_enabled, enable_totp, disable_totp, get_or_create_totp_secret, verify_totp
+                    while True:
+                        status = "enabled" if is_totp_enabled() else "disabled"
+                        print(f"\n--- 2FA Settings (TOTP) --- [Currently {status}]")
+                        print("1. Enable 2FA (TOTP)")
+                        print("2. Disable 2FA (TOTP) [requires 2FA]")
+                        print("3. Show TOTP secret (for setup/change) [requires master password]")
+                        print("4. Back to settings")
+                        fa_choice = timed_input("Select an option: ", session.timeout)
+                        if fa_choice is None or fa_choice == "4":
+                            break
+                        elif fa_choice == "1":
+                            enable_totp()
+                        elif fa_choice == "2":
+                            if not is_totp_enabled():
+                                print("[!] TOTP is not enabled.")
+                                continue
+                            print("[!] Enter your 2FA code to disable TOTP.")
+                            for _ in range(3):
+                                code = timed_input("2FA code: ", session.timeout)
+                                if code and verify_totp(code):
+                                    disable_totp()
+                                    break
+                                else:
+                                    print("❌ Invalid 2FA code.")
+                            else:
+                                print("❌ Too many failed 2FA attempts.")
+                        elif fa_choice == "3":
+                            from modules.auth import MASTER_PASSWORD_FILE
+                            import bcrypt
+                            import getpass
+                            with open(MASTER_PASSWORD_FILE, "rb") as f:
+                                stored_hash = f.read()
+                            for _ in range(3):
+                                old_pw = getpass.getpass("Enter current master password: ")
+                                if bcrypt.checkpw(old_pw.encode(), stored_hash):
+                                    secret = get_or_create_totp_secret()
+                                    print(f"[!] Your TOTP secret (scan in authenticator app):\n{secret}")
+                                    break
+                                else:
+                                    print("❌ Incorrect password.")
+                            else:
+                                print("❌ Too many failed attempts.")
+                        else:
+                            print("Invalid option. Please try again.")
+        elif choice == "5":
             print("Goodbye!")
             session.stop()
             break
-
         else:
             print("Invalid option. Please try again.")
 

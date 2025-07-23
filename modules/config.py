@@ -12,6 +12,7 @@ SECURE_FOLDER = os.path.join(HOME_DIR, ".local_passman")
 MASTER_PASSWORD_FILE = os.path.join(SECURE_FOLDER, ".master")
 FERNET_KEY_FILE = os.path.join(SECURE_FOLDER, ".fernet_key")
 DATABASE_FILE = os.path.join(SECURE_FOLDER, "passwords.db")
+SESSION_TIMEOUT_FILE = os.path.join(SECURE_FOLDER, ".session_timeout")
 
 # Permissions
 FOLDER_PERMISSION = 0o700  # Only owner can access folder
