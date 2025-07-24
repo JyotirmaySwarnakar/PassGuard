@@ -79,10 +79,10 @@ def filter_credentials(credentials, query):
 def print_banner():
     """Print application banner"""
     banner = """
-╔════════════════════════════════════╗
-║           🔐 PassGrard             ║
-║     Secure • Local • Private       ║
-╚════════════════════════════════════╝
+╔══════════════════════════════════════╗
+║        🔐 Password Manager           ║
+║     Secure • Local • Private        ║
+╚══════════════════════════════════════╝
 """
     print(banner)
 
@@ -161,7 +161,7 @@ def handle_copy_password(filtered_credentials, session):
         print("❌ Please enter a valid number.")
 
 def handle_edit_credential(filtered_credentials, all_credentials, session):
-    """Handle editing a credential"""
+    """Handle editing a credential with duplicate checking"""
     sel = timed_input("Enter credential number to edit: ", session.timeout)
     if sel is None:
         session.lock()
@@ -174,7 +174,7 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
             idx_in_all = all_credentials.index(cred) + 1
             old_service, old_username, old_password = cred
             
-            print(f"\nEditing: {old_service} | {old_username}")
+            print(f"\n📝 Editing: {old_service} | {old_username}")
             print("(Press Enter to keep current value)")
             
             new_service = timed_input(f"Service [{old_service}]: ", session.timeout)
@@ -189,20 +189,105 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
                 return
             new_username = new_username.strip() or old_username
             
-            new_password = timed_getpass("New password (Enter to keep current): ", session.timeout)
-            if new_password is None:
-                session.lock()
+            # Password confirmation for new password
+            password_changed = False
+            while True:
+                change_password = timed_input("Change password? (y/N): ", session.timeout)
+                if change_password is None:
+                    session.lock()
+                    return
+                
+                if change_password.lower() == 'y':
+                    while True:
+                        new_password = timed_getpass("New password: ", session.timeout)
+                        if new_password is None:
+                            session.lock()
+                            return
+                        
+                        if not new_password.strip():
+                            print("❌ Password cannot be empty.")
+                            continue
+                        
+                        confirm_password = timed_getpass("Confirm new password: ", session.timeout)
+                        if confirm_password is None:
+                            session.lock()
+                            return
+                        
+                        if new_password == confirm_password:
+                            password_changed = True
+                            break
+                        else:
+                            print("❌ Passwords don't match. Please try again.")
+                    break
+                else:
+                    new_password = old_password
+                    break
+            
+            # Check for duplicates only if service or username changed
+            service_or_username_changed = (
+                new_service.lower() != old_service.lower() or 
+                new_username.lower() != old_username.lower()
+            )
+            
+            # If service or username changed, check for duplicates
+            if service_or_username_changed:
+                existing_credentials = get_credentials()
+                duplicate_found = False
+                
+                for existing_service, existing_username, _ in existing_credentials:
+                    # Skip the current credential being edited
+                    if (existing_service == old_service and existing_username == old_username):
+                        continue
+                    # Check for duplicate
+                    if existing_service.lower() == new_service.lower() and existing_username.lower() == new_username.lower():
+                        duplicate_found = True
+                        break
+                
+                if duplicate_found:
+                    print(f"\n❌ Cannot update: Duplicate credential detected!")
+                    print(f"   Service: {new_service}")
+                    print(f"   Username: {new_username}")
+                    print("💡 This service + username combination already exists.")
+                    print("   Multiple accounts per service are allowed, but usernames must be unique per service.")
+                    return
+            
+            # Show update summary
+            if service_or_username_changed:
+                print(f"\n📋 Update Summary:")
+                print(f"   Service: {old_service} → {new_service}")
+                print(f"   Username: {old_username} → {new_username}")
+                if password_changed:
+                    print(f"   Password: [changed - {len(new_password)} characters]")
+                else:
+                    print(f"   Password: [unchanged]")
+            elif password_changed:
+                print(f"\n📋 Update Summary:")
+                print(f"   Service: {new_service} (unchanged)")
+                print(f"   Username: {new_username} (unchanged)")
+                print(f"   Password: [changed - {len(new_password)} characters]")
+            else:
+                print("ℹ️  No changes detected.")
                 return
-            new_password = new_password.strip() or old_password
             
             if confirm_action("💾 Save changes?", session):
-                edit_credential(idx_in_all, new_service, new_username, new_password)
-                print("✅ Credential updated successfully!")
+                try:
+                    edit_credential(idx_in_all, new_service, new_username, new_password)
+                    print("✅ Credential updated successfully!")
+                except Exception as e:
+                    # Check if it's a database constraint error (duplicate)
+                    error_msg = str(e).lower()
+                    if 'unique' in error_msg or 'duplicate' in error_msg:
+                        print("❌ Cannot update: Duplicate credential detected by database constraint.")
+                        print("💡 This service + username combination already exists.")
+                    else:
+                        print(f"❌ Update failed: {e}")
             else:
                 print("❌ Changes cancelled.")
         else:
             print("❌ Invalid selection.")
-    except (ValueError, IndexError) as e:
+    except ValueError:
+        print("❌ Please enter a valid number.")
+    except Exception as e:
         print(f"❌ Error: {e}")
 
 def handle_delete_credential(filtered_credentials, all_credentials, session):
@@ -231,7 +316,7 @@ def handle_delete_credential(filtered_credentials, all_credentials, session):
         print(f"❌ Error: {e}")
 
 def handle_add_credential(session):
-    """Handle adding a new credential"""
+    """Handle adding a new credential with password confirmation and duplicate checking"""
     print("\n➕ Add New Credential")
     print("-" * 25)
     
@@ -245,25 +330,95 @@ def handle_add_credential(session):
         session.lock()
         return
     
-    password = timed_getpass("🔑 Password: ", session.timeout)
-    if password is None:
-        session.lock()
-        return
+    # Password input with confirmation
+    while True:
+        password = timed_getpass("🔑 Password: ", session.timeout)
+        if password is None:
+            session.lock()
+            return
+        
+        password_confirm = timed_getpass("🔑 Confirm password: ", session.timeout)
+        if password_confirm is None:
+            session.lock()
+            return
+        
+        if password == password_confirm:
+            break
+        else:
+            print("❌ Passwords don't match. Please try again.")
+            continue
     
     if not all([service.strip(), username.strip(), password.strip()]):
         print("❌ All fields are required.")
         return
     
-    print(f"\nService: {service}")
-    print(f"Username: {username}")
-    print("Password: [hidden]")
+    # Validate and prepare data
+    service = service.strip()
+    username = username.strip()
+    password = password.strip()
+    
+    # Check for duplicate service + username combination by querying existing credentials
+    existing_credentials = get_credentials()
+    duplicate_found = False
+    
+    for existing_service, existing_username, _ in existing_credentials:
+        if existing_service.lower() == service.lower() and existing_username.lower() == username.lower():
+            duplicate_found = True
+            break
+    
+    if duplicate_found:
+        print(f"\n⚠️  Duplicate credential detected!")
+        print(f"   Service: {service}")
+        print(f"   Username: {username}")
+        print(f"\n💡 You already have a credential for '{username}' on '{service}'.")
+        print("   Multiple accounts per service are allowed, but usernames must be unique per service.")
+        
+        while True:
+            choice = timed_input("Options: (u)pdate existing password, (c)ancel: ", session.timeout)
+            if choice is None:
+                session.lock()
+                return
+            
+            session.refresh()
+            choice = choice.lower().strip()
+            
+            if choice == 'u':
+                # Update existing credential's password
+                try:
+                    # Find the credential index and update it
+                    credentials = get_credentials()
+                    for idx, (cred_service, cred_username, _) in enumerate(credentials, 1):
+                        if cred_service.lower() == service.lower() and cred_username.lower() == username.lower():
+                            edit_credential(idx, service, username, password)
+                            print("✅ Password updated for existing credential!")
+                            return
+                except Exception as e:
+                    print(f"❌ Failed to update credential: {e}")
+                    return
+            elif choice == 'c':
+                print("❌ Credential not saved.")
+                return
+            else:
+                print("❌ Invalid option. Please enter 'u' to update or 'c' to cancel.")
+    
+    # Show summary before saving
+    print(f"\n📋 Credential Summary:")
+    print(f"   Service: {service}")
+    print(f"   Username: {username}")
+    print(f"   Password: [hidden - {len(password)} characters]")
     
     if confirm_action("💾 Save this credential?", session):
         try:
-            add_credential(service.strip(), username.strip(), password.strip())
+            add_credential(service, username, password)
             print("✅ Credential saved securely!")
-        except ValueError as e:
-            print(f"❌ Error: {e}")
+        except Exception as e:
+            # Check if it's a database constraint error (duplicate)
+            error_msg = str(e).lower()
+            if 'unique' in error_msg or 'duplicate' in error_msg:
+                print("❌ Duplicate credential detected by database constraint.")
+                print("💡 This service + username combination already exists.")
+            else:
+                print(f"❌ Failed to save credential: {e}")
     else:
         print("❌ Credential not saved.")
 
@@ -283,13 +438,63 @@ def handle_import_export(session):
         session.refresh()
         
         if choice == "1":
-            path = timed_input("Export file path: ", session.timeout)
+            path = timed_input("📁 Export file path: ", session.timeout)
             if path and path.strip():
-                export_credentials_json(path.strip())
+                if export_credentials_json(path.strip()):
+                    print("✅ Credentials exported successfully!")
+                    print("💡 Tip: Keep your backup file secure - it contains encrypted passwords!")
+                
         elif choice == "2":
-            path = timed_input("Import file path: ", session.timeout)
+            path = timed_input("📁 Import file path: ", session.timeout)
             if path and path.strip():
-                import_credentials_json(path.strip())
+                print("\n🔄 Starting import process...")
+                print("⚠️  This may take a moment for large files.")
+                
+                # Create a wrapper to handle session timeouts during import
+                try:
+                    # Temporarily disable session timeout for import process
+                    original_timeout = session.timeout
+                    session.timeout = 3600  # 1 hour for import process
+                    session.refresh()
+                    
+                    # Use the enhanced import function that handles duplicates
+                    result = import_credentials_json(path.strip())
+                    
+                    # Restore original timeout
+                    session.timeout = original_timeout
+                    session.refresh()
+                    
+                    # The import function already handles all user interaction for duplicates
+                    # Just show final summary based on results
+                    if result.imported > 0 or result.updated > 0:
+                        print(f"\n🎉 Import process completed!")
+                        if result.imported > 0:
+                            print(f"   📥 {result.imported} new credential(s) imported")
+                        if result.updated > 0:
+                            print(f"   🔄 {result.updated} existing credential(s) updated")
+                        if result.skipped > 0:
+                            print(f"   ⏭️  {result.skipped} duplicate(s) skipped")
+                        if result.errors > 0:
+                            print(f"   ⚠️  {result.errors} error(s) occurred")
+                    elif result.skipped > 0:
+                        print(f"\n📝 Import completed with {result.skipped} credential(s) skipped.")
+                        print("   No new credentials were added.")
+                    elif result.errors > 0:
+                        print(f"\n❌ Import failed with {result.errors} error(s).")
+                        print("   Please check the file format and try again.")
+                    else:
+                        print("\n📝 No credentials were processed.")
+                        print("   The backup file may be empty or invalid.")
+                        
+                except KeyboardInterrupt:
+                    print("\n⚠️  Import cancelled by user.")
+                    session.timeout = original_timeout
+                    session.refresh()
+                except Exception as e:
+                    print(f"\n❌ Import process failed: {e}")
+                    session.timeout = original_timeout
+                    session.refresh()
+                
         else:
             print("❌ Invalid option.")
 
@@ -491,7 +696,7 @@ def main():
             
             # Main menu
             print("\n" + "="*45)
-            print("🔐 PassGuard")
+            print("🔐 LOCAL PASSWORD MANAGER")
             print("="*45)
             print("1. 👀 View & manage credentials")
             print("2. ➕ Add new credential")
@@ -517,7 +722,7 @@ def main():
             elif choice == "4":
                 handle_settings(session)
             elif choice == "5":
-                print("\n👋 Thank you for using PassGuard")
+                print("\n👋 Thank you for using Password Manager!")
                 print("🔒 Your data remains secure and encrypted.")
                 session.stop()
                 break

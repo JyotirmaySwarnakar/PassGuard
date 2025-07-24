@@ -2,15 +2,23 @@
 """
 Database Management Module
 Handles SQLite database operations for credential storage with encryption.
+Enhanced with duplicate detection and handling.
 """
 
 import sqlite3
 import os
 from contextlib import contextmanager
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Dict
 from .config import DATABASE_FILE
 from .utils import set_secure_permissions
 from .crypto_utils import encrypt_data, decrypt_data
+
+class DuplicateCredentialError(Exception):
+    """Raised when attempting to add duplicate credentials."""
+    def __init__(self, service: str, username: str):
+        self.service = service
+        self.username = username
+        super().__init__(f"Credential for {service} with username {username} already exists")
 
 class DatabaseManager:
     """Manages database operations for the password manager."""
@@ -47,8 +55,15 @@ class DatabaseManager:
                         service TEXT NOT NULL,
                         username TEXT NOT NULL,
                         password TEXT NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
+                ''')
+                
+                # Create unique index for service + username combination
+                cursor.execute('''
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_service_username 
+                    ON credentials(service, username)
                 ''')
                 
                 # Create index for faster searches
@@ -62,7 +77,57 @@ class DatabaseManager:
             
             set_secure_permissions(self.db_file)
     
-    def add_credential(self, service: str, username: str, password: str):
+    def credential_exists(self, service: str, username: str) -> bool:
+        """
+        Check if a credential already exists (case-insensitive).
+        
+        Args:
+            service (str): Service name
+            username (str): Username/email
+            
+        Returns:
+            bool: True if credential exists, False otherwise
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT COUNT(*) FROM credentials 
+                    WHERE LOWER(service) = LOWER(?) AND username = ?
+                ''', (service.strip(), encrypt_data(username.strip())))
+                count = cursor.fetchone()[0]
+                return count > 0
+        except Exception:
+            return False
+    
+    def get_existing_credential(self, service: str, username: str) -> Optional[Tuple[str, str, str]]:
+        """
+        Get existing credential details.
+        
+        Args:
+            service (str): Service name
+            username (str): Username/email
+            
+        Returns:
+            Optional[Tuple[str, str, str]]: (service, username, password) if found, None otherwise
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT service, username, password FROM credentials 
+                    WHERE LOWER(service) = LOWER(?) AND username = ?
+                ''', (service.strip(), encrypt_data(username.strip())))
+                result = cursor.fetchone()
+                
+                if result:
+                    service, enc_username, enc_password = result
+                    return (service, decrypt_data(enc_username), decrypt_data(enc_password))
+                return None
+        except Exception:
+            return None
+    
+    def add_credential(self, service: str, username: str, password: str, allow_duplicates: bool = False):
         """
         Add a new credential to the database.
         
@@ -70,18 +135,24 @@ class DatabaseManager:
             service (str): Service name
             username (str): Username/email
             password (str): Password (will be encrypted)
+            allow_duplicates (bool): If True, skip duplicate check
             
         Raises:
             ValueError: If any field is empty
+            DuplicateCredentialError: If credential already exists and duplicates not allowed
             Exception: If database operation fails
         """
         # Validate input
         if not all([service.strip(), username.strip(), password.strip()]):
             raise ValueError("Service, username, and password cannot be empty.")
         
-        # Check for duplicates
-        if self._credential_exists(service, username):
-            raise ValueError(f"Credential for {service} with username {username} already exists.")
+        service = service.strip()
+        username = username.strip()
+        password = password.strip()
+        
+        # Check for duplicates if not allowed
+        if not allow_duplicates and self.credential_exists(service, username):
+            raise DuplicateCredentialError(service, username)
         
         try:
             with self.get_connection() as conn:
@@ -89,10 +160,39 @@ class DatabaseManager:
                 cursor.execute('''
                     INSERT INTO credentials (service, username, password)
                     VALUES (?, ?, ?)
-                ''', (service.strip(), encrypt_data(username), encrypt_data(password)))
+                ''', (service, encrypt_data(username), encrypt_data(password)))
                 conn.commit()
+        except sqlite3.IntegrityError:
+            # This should be caught by our duplicate check, but just in case
+            raise DuplicateCredentialError(service, username)
         except Exception as e:
             raise Exception(f"Failed to add credential: {e}")
+    
+    def update_credential(self, service: str, username: str, new_password: str):
+        """
+        Update an existing credential's password.
+        
+        Args:
+            service (str): Service name
+            username (str): Username/email
+            new_password (str): New password
+            
+        Returns:
+            bool: True if credential was updated, False if not found
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE credentials
+                    SET password = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE LOWER(service) = LOWER(?) AND username = ?
+                ''', (encrypt_data(new_password), service.strip(), encrypt_data(username.strip())))
+                
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            raise Exception(f"Failed to update credential: {e}")
     
     def get_credentials(self) -> List[Tuple[str, str, str]]:
         """
@@ -107,7 +207,7 @@ class DatabaseManager:
                 cursor.execute('''
                     SELECT service, username, password 
                     FROM credentials 
-                    ORDER BY service, username
+                    ORDER BY LOWER(service), LOWER(username)
                 ''')
                 records = cursor.fetchall()
                 
@@ -133,30 +233,42 @@ class DatabaseManager:
         Raises:
             IndexError: If index is invalid
             ValueError: If new values are empty
+            DuplicateCredentialError: If new service+username combination already exists
             Exception: If database operation fails
         """
         if not all([new_service.strip(), new_username.strip(), new_password.strip()]):
             raise ValueError("Service, username, and password cannot be empty.")
         
+        new_service = new_service.strip()
+        new_username = new_username.strip()
+        new_password = new_password.strip()
+        
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # Get all credential IDs
-                cursor.execute('SELECT id FROM credentials ORDER BY service, username')
-                ids = [row[0] for row in cursor.fetchall()]
+                # Get all credential IDs and current data
+                cursor.execute('SELECT id, service, username FROM credentials ORDER BY LOWER(service), LOWER(username)')
+                records = cursor.fetchall()
                 
-                if index < 1 or index > len(ids):
+                if index < 1 or index > len(records):
                     raise IndexError("Invalid credential index.")
                 
-                cred_id = ids[index - 1]
+                cred_id, current_service, current_username = records[index - 1]
+                current_username_decrypted = decrypt_data(current_username)
+                
+                # Check if we're changing to a duplicate (but not the same record)
+                if (new_service.lower() != current_service.lower() or 
+                    new_username.lower() != current_username_decrypted.lower()) and \
+                   self.credential_exists(new_service, new_username):
+                    raise DuplicateCredentialError(new_service, new_username)
                 
                 # Update the credential
                 cursor.execute('''
                     UPDATE credentials
-                    SET service = ?, username = ?, password = ?
+                    SET service = ?, username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (new_service.strip(), encrypt_data(new_username), encrypt_data(new_password), cred_id))
+                ''', (new_service, encrypt_data(new_username), encrypt_data(new_password), cred_id))
                 
                 conn.commit()
                 
@@ -164,6 +276,8 @@ class DatabaseManager:
                     raise Exception("No credential was updated.")
                     
         except IndexError:
+            raise
+        except DuplicateCredentialError:
             raise
         except Exception as e:
             raise Exception(f"Failed to edit credential: {e}")
@@ -184,7 +298,7 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 
                 # Get all credential IDs
-                cursor.execute('SELECT id FROM credentials ORDER BY service, username')
+                cursor.execute('SELECT id FROM credentials ORDER BY LOWER(service), LOWER(username)')
                 ids = [row[0] for row in cursor.fetchall()]
                 
                 if index < 1 or index > len(ids):
@@ -204,29 +318,6 @@ class DatabaseManager:
         except Exception as e:
             raise Exception(f"Failed to remove credential: {e}")
     
-    def _credential_exists(self, service: str, username: str) -> bool:
-        """
-        Check if a credential already exists.
-        
-        Args:
-            service (str): Service name
-            username (str): Username
-            
-        Returns:
-            bool: True if credential exists, False otherwise
-        """
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT COUNT(*) FROM credentials 
-                    WHERE service = ? AND username = ?
-                ''', (service, encrypt_data(username)))
-                count = cursor.fetchone()[0]
-                return count > 0
-        except Exception:
-            return False
-    
     def get_credential_count(self) -> int:
         """
         Get the total number of stored credentials.
@@ -241,6 +332,46 @@ class DatabaseManager:
                 return cursor.fetchone()[0]
         except Exception:
             return 0
+    
+    def get_duplicate_analysis(self, credentials_list: List[Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
+        """
+        Analyze a list of credentials for duplicates against existing database.
+        
+        Args:
+            credentials_list (List[Dict]): List of credential dictionaries
+            
+        Returns:
+            Dict: {
+                'new': [list of new credentials],
+                'duplicates': [list of duplicate credentials with existing data]
+            }
+        """
+        analysis = {
+            'new': [],
+            'duplicates': []
+        }
+        
+        for cred in credentials_list:
+            service = cred.get('service', '').strip()
+            username = cred.get('username', '').strip()
+            password = cred.get('password', '').strip()
+            
+            if not all([service, username, password]):
+                continue  # Skip invalid entries
+            
+            if self.credential_exists(service, username):
+                existing = self.get_existing_credential(service, username)
+                analysis['duplicates'].append({
+                    'service': service,
+                    'username': username,
+                    'new_password': password,
+                    'existing_password': existing[2] if existing else '',
+                    'passwords_match': existing and existing[2] == password
+                })
+            else:
+                analysis['new'].append(cred)
+        
+        return analysis
 
 # Global instance for backward compatibility
 _db_manager = DatabaseManager()
@@ -250,9 +381,9 @@ def initialize_db():
     """Initialize database (legacy function)."""
     return _db_manager.initialize_db()
 
-def add_credential(service: str, username: str, password: str):
+def add_credential(service: str, username: str, password: str, allow_duplicates: bool = False):
     """Add credential (legacy function)."""
-    return _db_manager.add_credential(service, username, password)
+    return _db_manager.add_credential(service, username, password, allow_duplicates)
 
 def get_credentials() -> List[Tuple[str, str, str]]:
     """Get credentials (legacy function)."""
@@ -265,3 +396,7 @@ def edit_credential(index: int, new_service: str, new_username: str, new_passwor
 def remove_credential(index: int):
     """Remove credential (legacy function)."""
     return _db_manager.remove_credential(index)
+
+def credential_exists(service: str, username: str) -> bool:
+    """Check if credential exists (legacy function)."""
+    return _db_manager.credential_exists(service, username)
