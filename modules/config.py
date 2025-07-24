@@ -6,7 +6,7 @@ import os
 HOME_DIR = os.path.expanduser("~")
 
 # Secure app data folder
-SECURE_FOLDER = os.path.join(HOME_DIR, ".local_passman")
+SECURE_FOLDER = os.path.join(HOME_DIR, ".PassGuard")
 
 # Files
 MASTER_PASSWORD_FILE = os.path.join(SECURE_FOLDER, ".master")
