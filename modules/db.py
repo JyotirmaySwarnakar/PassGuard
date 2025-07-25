@@ -77,13 +77,14 @@ class DatabaseManager:
             
             set_secure_permissions(self.db_file)
     
-    def credential_exists(self, service: str, username: str) -> bool:
+    def credential_exists(self, service: str, username: str, exclude_id: Optional[int] = None) -> bool:
         """
         Check if a credential already exists (case-insensitive).
         
         Args:
             service (str): Service name
             username (str): Username/email
+            exclude_id (Optional[int]): ID to exclude from check (for editing)
             
         Returns:
             bool: True if credential exists, False otherwise
@@ -91,10 +92,18 @@ class DatabaseManager:
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT COUNT(*) FROM credentials 
-                    WHERE LOWER(service) = LOWER(?) AND username = ?
-                ''', (service.strip(), encrypt_data(username.strip())))
+                
+                if exclude_id is not None:
+                    cursor.execute('''
+                        SELECT COUNT(*) FROM credentials 
+                        WHERE LOWER(service) = LOWER(?) AND username = ? AND id != ?
+                    ''', (service.strip(), encrypt_data(username.strip()), exclude_id))
+                else:
+                    cursor.execute('''
+                        SELECT COUNT(*) FROM credentials 
+                        WHERE LOWER(service) = LOWER(?) AND username = ?
+                    ''', (service.strip(), encrypt_data(username.strip())))
+                
                 count = cursor.fetchone()[0]
                 return count > 0
         except Exception:
@@ -220,9 +229,39 @@ class DatabaseManager:
             print(f"❌ Failed to retrieve credentials: {e}")
             return []
     
+    def get_credential_by_index(self, index: int) -> Optional[Tuple[int, str, str, str]]:
+        """
+        Get credential by index (1-based).
+        
+        Args:
+            index (int): 1-based index of credential
+            
+        Returns:
+            Optional[Tuple[int, str, str, str]]: (id, service, username, password) if found, None otherwise
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, service, username, password 
+                    FROM credentials 
+                    ORDER BY LOWER(service), LOWER(username)
+                ''')
+                records = cursor.fetchall()
+                
+                if index < 1 or index > len(records):
+                    return None
+                
+                record = records[index - 1]
+                cred_id, service, enc_username, enc_password = record
+                
+                return (cred_id, service, decrypt_data(enc_username), decrypt_data(enc_password))
+        except Exception:
+            return None
+    
     def edit_credential(self, index: int, new_service: str, new_username: str, new_password: str):
         """
-        Edit an existing credential.
+        Edit an existing credential by index.
         
         Args:
             index (int): 1-based index of credential to edit
@@ -243,25 +282,22 @@ class DatabaseManager:
         new_username = new_username.strip()
         new_password = new_password.strip()
         
+        # Get the credential to edit
+        credential = self.get_credential_by_index(index)
+        if credential is None:
+            raise IndexError("Invalid credential index.")
+        
+        cred_id, current_service, current_username, current_password = credential
+        
+        # Check if we're changing to a duplicate (excluding current record)
+        if (new_service.lower() != current_service.lower() or 
+            new_username.lower() != current_username.lower()):
+            if self.credential_exists(new_service, new_username, exclude_id=cred_id):
+                raise DuplicateCredentialError(new_service, new_username)
+        
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
-                # Get all credential IDs and current data
-                cursor.execute('SELECT id, service, username FROM credentials ORDER BY LOWER(service), LOWER(username)')
-                records = cursor.fetchall()
-                
-                if index < 1 or index > len(records):
-                    raise IndexError("Invalid credential index.")
-                
-                cred_id, current_service, current_username = records[index - 1]
-                current_username_decrypted = decrypt_data(current_username)
-                
-                # Check if we're changing to a duplicate (but not the same record)
-                if (new_service.lower() != current_service.lower() or 
-                    new_username.lower() != current_username_decrypted.lower()) and \
-                   self.credential_exists(new_service, new_username):
-                    raise DuplicateCredentialError(new_service, new_username)
                 
                 # Update the credential
                 cursor.execute('''
@@ -275,8 +311,8 @@ class DatabaseManager:
                 if cursor.rowcount == 0:
                     raise Exception("No credential was updated.")
                     
-        except IndexError:
-            raise
+        except sqlite3.IntegrityError:
+            raise DuplicateCredentialError(new_service, new_username)
         except DuplicateCredentialError:
             raise
         except Exception as e:
@@ -293,18 +329,16 @@ class DatabaseManager:
             IndexError: If index is invalid
             Exception: If database operation fails
         """
+        # Get the credential to delete
+        credential = self.get_credential_by_index(index)
+        if credential is None:
+            raise IndexError("Invalid credential index.")
+        
+        cred_id = credential[0]
+        
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
-                # Get all credential IDs
-                cursor.execute('SELECT id FROM credentials ORDER BY LOWER(service), LOWER(username)')
-                ids = [row[0] for row in cursor.fetchall()]
-                
-                if index < 1 or index > len(ids):
-                    raise IndexError("Invalid credential index.")
-                
-                cred_id = ids[index - 1]
                 
                 # Delete the credential
                 cursor.execute('DELETE FROM credentials WHERE id = ?', (cred_id,))
@@ -313,8 +347,6 @@ class DatabaseManager:
                 if cursor.rowcount == 0:
                     raise Exception("No credential was deleted.")
                     
-        except IndexError:
-            raise
         except Exception as e:
             raise Exception(f"Failed to remove credential: {e}")
     

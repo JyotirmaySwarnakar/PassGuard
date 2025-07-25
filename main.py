@@ -79,10 +79,10 @@ def filter_credentials(credentials, query):
 def print_banner():
     """Print application banner"""
     banner = """
-╔══════════════════════════════════════╗
-║        🔐 Password Manager           ║
-║     Secure • Local • Private        ║
-╚══════════════════════════════════════╝
+╔══════════════════════════════════╗
+║          🔐 PassGuard            ║
+║     Secure • Local • Private     ║
+╚══════════════════════════════════╝
 """
     print(banner)
 
@@ -171,7 +171,13 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
         sel = int(sel)
         if 1 <= sel <= len(filtered_credentials):
             cred = filtered_credentials[sel - 1]
-            idx_in_all = all_credentials.index(cred) + 1
+            # Find the actual index in all_credentials
+            try:
+                idx_in_all = all_credentials.index(cred) + 1
+            except ValueError:
+                print("❌ Error: Credential not found in database.")
+                return
+            
             old_service, old_username, old_password = cred
             
             print(f"\n📝 Editing: {old_service} | {old_username}")
@@ -188,6 +194,24 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
                 session.lock()
                 return
             new_username = new_username.strip() or old_username
+
+            # Check for duplicate (only if service or username changed and the new combination exists in another credential)
+            if new_service != old_service or new_username != old_username:
+                duplicate_found = False
+                for idx, (s, u, _) in enumerate(all_credentials):
+                    if idx == idx_in_all - 1:  # skip the current credential
+                        continue
+                    if s.lower() == new_service.lower() and u.lower() == new_username.lower():
+                        duplicate_found = True
+                        break
+
+                if duplicate_found:
+                    print("❌ Cannot update: Duplicate credential detected!")
+                    print(f"   Service: {new_service}")
+                    print(f"   Username: {new_username}")
+                    print("💡 This service + username combination already exists.")
+                    print("   Multiple accounts per service are allowed, but usernames must be unique per service.")
+                    return
             
             # Password confirmation for new password
             password_changed = False
@@ -223,62 +247,51 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
                     new_password = old_password
                     break
             
-            # Check for duplicates only if service or username changed
-            service_or_username_changed = (
-                new_service.lower() != old_service.lower() or 
-                new_username.lower() != old_username.lower()
-            )
-            
-            # If service or username changed, check for duplicates
-            if service_or_username_changed:
-                existing_credentials = get_credentials()
-                duplicate_found = False
-                
-                for existing_service, existing_username, _ in existing_credentials:
-                    # Skip the current credential being edited
-                    if (existing_service == old_service and existing_username == old_username):
-                        continue
-                    # Check for duplicate
-                    if existing_service.lower() == new_service.lower() and existing_username.lower() == new_username.lower():
-                        duplicate_found = True
-                        break
-                
-                if duplicate_found:
-                    print(f"\n❌ Cannot update: Duplicate credential detected!")
-                    print(f"   Service: {new_service}")
-                    print(f"   Username: {new_username}")
-                    print("💡 This service + username combination already exists.")
-                    print("   Multiple accounts per service are allowed, but usernames must be unique per service.")
-                    return
-            
             # Show update summary
-            if service_or_username_changed:
+            changes_detected = False
+            
+            if new_service != old_service or new_username != old_username or password_changed:
+                changes_detected = True
                 print(f"\n📋 Update Summary:")
-                print(f"   Service: {old_service} → {new_service}")
-                print(f"   Username: {old_username} → {new_username}")
+                
+                if new_service != old_service:
+                    print(f"   Service: {old_service} → {new_service}")
+                else:
+                    print(f"   Service: {new_service} (unchanged)")
+                
+                if new_username != old_username:
+                    print(f"   Username: {old_username} → {new_username}")
+                else:
+                    print(f"   Username: {new_username} (unchanged)")
+                
                 if password_changed:
                     print(f"   Password: [changed - {len(new_password)} characters]")
                 else:
                     print(f"   Password: [unchanged]")
-            elif password_changed:
-                print(f"\n📋 Update Summary:")
-                print(f"   Service: {new_service} (unchanged)")
-                print(f"   Username: {new_username} (unchanged)")
-                print(f"   Password: [changed - {len(new_password)} characters]")
             else:
                 print("ℹ️  No changes detected.")
                 return
             
             if confirm_action("💾 Save changes?", session):
                 try:
+                    # Save the changes
                     edit_credential(idx_in_all, new_service, new_username, new_password)
+                    
+                    # Update the credential in the current view
+                    filtered_credentials[sel - 1] = (new_service, new_username, new_password)
+                    all_credentials[idx_in_all - 1] = (new_service, new_username, new_password)
+                    
                     print("✅ Credential updated successfully!")
+                    print(f"\n🔄 Updated: {new_service} | {new_username}")
                 except Exception as e:
                     # Check if it's a database constraint error (duplicate)
                     error_msg = str(e).lower()
-                    if 'unique' in error_msg or 'duplicate' in error_msg:
-                        print("❌ Cannot update: Duplicate credential detected by database constraint.")
+                    if 'duplicate' in error_msg or 'already exists' in error_msg:
+                        print("❌ Cannot update: Duplicate credential detected!")
+                        print(f"   Service: {new_service}")
+                        print(f"   Username: {new_username}")
                         print("💡 This service + username combination already exists.")
+                        print("   Multiple accounts per service are allowed, but usernames must be unique per service.")
                     else:
                         print(f"❌ Update failed: {e}")
             else:
@@ -301,18 +314,33 @@ def handle_delete_credential(filtered_credentials, all_credentials, session):
         sel = int(sel)
         if 1 <= sel <= len(filtered_credentials):
             cred = filtered_credentials[sel - 1]
-            idx_in_all = all_credentials.index(cred) + 1
             service, username, _ = cred
             
-            print(f"⚠️  Delete: {service} | {username}")
-            if confirm_action("🗑️  This action cannot be undone. Continue?", session):
+            print(f"\n⚠️ WARNING: Deleting credential for:")
+            print(f"   Service: {service}")
+            print(f"   Username: {username}")
+            
+            if confirm_action("❌ Are you sure you want to permanently delete this credential?", session):
+                # Find the actual index in all_credentials
+                try:
+                    idx_in_all = all_credentials.index(cred) + 1
+                except ValueError:
+                    print("❌ Error: Credential not found in database.")
+                    return
+                
                 remove_credential(idx_in_all)
                 print("✅ Credential deleted successfully!")
+                
+                # Remove from filtered and all credentials lists
+                del filtered_credentials[sel - 1]
+                all_credentials.remove(cred)
             else:
                 print("❌ Deletion cancelled.")
         else:
             print("❌ Invalid selection.")
-    except (ValueError, IndexError) as e:
+    except ValueError:
+        print("❌ Please enter a valid number.")
+    except Exception as e:
         print(f"❌ Error: {e}")
 
 def handle_add_credential(session):
@@ -696,7 +724,7 @@ def main():
             
             # Main menu
             print("\n" + "="*45)
-            print("🔐 LOCAL PASSWORD MANAGER")
+            print("🔐 PassGuard ")
             print("="*45)
             print("1. 👀 View & manage credentials")
             print("2. ➕ Add new credential")
