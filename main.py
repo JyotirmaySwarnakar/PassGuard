@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Local Password Manager - Secure CLI Password Storage
-A secure, lightweight command-line password manager with AES-256 encryption and 2FA support.
+A secure, lightweight command-line password manager with AES-256 encryption and selective 2FA.
 """
 
 import os
@@ -91,6 +91,38 @@ def confirm_action(message, session):
     response = timed_input(f"{message} (y/N): ", session.timeout)
     return response and response.lower() == 'y'
 
+def verify_master_password():
+    """Verify master password for sensitive operations"""
+    import bcrypt
+    with open(MASTER_PASSWORD_FILE, "rb") as f:
+        stored_hash = f.read()
+    
+    for attempt in range(3):
+        password = getpass.getpass("Enter master password: ")
+        if bcrypt.checkpw(password.encode(), stored_hash):
+            return True
+        print(f"❌ Incorrect password. {2-attempt} attempts remaining.")
+    print("❌ Too many failed attempts.")
+    return False
+
+def verify_2fa_for_critical_operations(operation_name, session):
+    """Verify 2FA for critical operations (master password change, disable 2FA)"""
+    if not is_totp_enabled():
+        return True
+    
+    print(f"🔒 2FA verification required for {operation_name}.")
+    for attempt in range(3):
+        code = timed_input("Enter 2FA code: ", session.timeout)
+        if code is None:
+            session.lock()
+            return False
+        if verify_totp(code):
+            print("✅ 2FA verified.")
+            return True
+        print(f"❌ Invalid 2FA code. {2-attempt} attempts remaining.")
+    print("❌ Too many failed 2FA attempts.")
+    return False
+
 def handle_view_credentials(session):
     """Handle viewing and managing credentials"""
     while True:
@@ -171,7 +203,6 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
         sel = int(sel)
         if 1 <= sel <= len(filtered_credentials):
             cred = filtered_credentials[sel - 1]
-            # Find the actual index in all_credentials
             try:
                 idx_in_all = all_credentials.index(cred) + 1
             except ValueError:
@@ -195,11 +226,11 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
                 return
             new_username = new_username.strip() or old_username
 
-            # Check for duplicate (only if service or username changed and the new combination exists in another credential)
+            # Check for duplicate
             if new_service != old_service or new_username != old_username:
                 duplicate_found = False
                 for idx, (s, u, _) in enumerate(all_credentials):
-                    if idx == idx_in_all - 1:  # skip the current credential
+                    if idx == idx_in_all - 1:
                         continue
                     if s.lower() == new_service.lower() and u.lower() == new_username.lower():
                         duplicate_found = True
@@ -210,10 +241,9 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
                     print(f"   Service: {new_service}")
                     print(f"   Username: {new_username}")
                     print("💡 This service + username combination already exists.")
-                    print("   Multiple accounts per service are allowed, but usernames must be unique per service.")
                     return
             
-            # Password confirmation for new password
+            # Handle password change
             password_changed = False
             while True:
                 change_password = timed_input("Change password? (y/N): ", session.timeout)
@@ -248,12 +278,8 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
                     break
             
             # Show update summary
-            changes_detected = False
-            
             if new_service != old_service or new_username != old_username or password_changed:
-                changes_detected = True
                 print(f"\n📋 Update Summary:")
-                
                 if new_service != old_service:
                     print(f"   Service: {old_service} → {new_service}")
                 else:
@@ -274,24 +300,15 @@ def handle_edit_credential(filtered_credentials, all_credentials, session):
             
             if confirm_action("💾 Save changes?", session):
                 try:
-                    # Save the changes
                     edit_credential(idx_in_all, new_service, new_username, new_password)
-                    
-                    # Update the credential in the current view
                     filtered_credentials[sel - 1] = (new_service, new_username, new_password)
                     all_credentials[idx_in_all - 1] = (new_service, new_username, new_password)
-                    
                     print("✅ Credential updated successfully!")
-                    print(f"\n🔄 Updated: {new_service} | {new_username}")
                 except Exception as e:
-                    # Check if it's a database constraint error (duplicate)
                     error_msg = str(e).lower()
                     if 'duplicate' in error_msg or 'already exists' in error_msg:
                         print("❌ Cannot update: Duplicate credential detected!")
-                        print(f"   Service: {new_service}")
-                        print(f"   Username: {new_username}")
                         print("💡 This service + username combination already exists.")
-                        print("   Multiple accounts per service are allowed, but usernames must be unique per service.")
                     else:
                         print(f"❌ Update failed: {e}")
             else:
@@ -321,7 +338,6 @@ def handle_delete_credential(filtered_credentials, all_credentials, session):
             print(f"   Username: {username}")
             
             if confirm_action("❌ Are you sure you want to permanently delete this credential?", session):
-                # Find the actual index in all_credentials
                 try:
                     idx_in_all = all_credentials.index(cred) + 1
                 except ValueError:
@@ -331,7 +347,6 @@ def handle_delete_credential(filtered_credentials, all_credentials, session):
                 remove_credential(idx_in_all)
                 print("✅ Credential deleted successfully!")
                 
-                # Remove from filtered and all credentials lists
                 del filtered_credentials[sel - 1]
                 all_credentials.remove(cred)
             else:
@@ -380,12 +395,11 @@ def handle_add_credential(session):
         print("❌ All fields are required.")
         return
     
-    # Validate and prepare data
     service = service.strip()
     username = username.strip()
     password = password.strip()
     
-    # Check for duplicate service + username combination by querying existing credentials
+    # Check for duplicates
     existing_credentials = get_credentials()
     duplicate_found = False
     
@@ -399,7 +413,6 @@ def handle_add_credential(session):
         print(f"   Service: {service}")
         print(f"   Username: {username}")
         print(f"\n💡 You already have a credential for '{username}' on '{service}'.")
-        print("   Multiple accounts per service are allowed, but usernames must be unique per service.")
         
         while True:
             choice = timed_input("Options: (u)pdate existing password, (c)ancel: ", session.timeout)
@@ -411,9 +424,7 @@ def handle_add_credential(session):
             choice = choice.lower().strip()
             
             if choice == 'u':
-                # Update existing credential's password
                 try:
-                    # Find the credential index and update it
                     credentials = get_credentials()
                     for idx, (cred_service, cred_username, _) in enumerate(credentials, 1):
                         if cred_service.lower() == service.lower() and cred_username.lower() == username.lower():
@@ -429,7 +440,7 @@ def handle_add_credential(session):
             else:
                 print("❌ Invalid option. Please enter 'u' to update or 'c' to cancel.")
     
-    # Show summary before saving
+    # Show summary
     print(f"\n📋 Credential Summary:")
     print(f"   Service: {service}")
     print(f"   Username: {username}")
@@ -440,7 +451,6 @@ def handle_add_credential(session):
             add_credential(service, username, password)
             print("✅ Credential saved securely!")
         except Exception as e:
-            # Check if it's a database constraint error (duplicate)
             error_msg = str(e).lower()
             if 'unique' in error_msg or 'duplicate' in error_msg:
                 print("❌ Duplicate credential detected by database constraint.")
@@ -475,43 +485,25 @@ def handle_import_export(session):
         elif choice == "2":
             path = timed_input("📁 Import file path: ", session.timeout)
             if path and path.strip():
-                print("\n🔄 Starting import process...")
-                print("⚠️  This may take a moment for large files.")
-                
-                # Create a wrapper to handle session timeouts during import
                 try:
-                    # Temporarily disable session timeout for import process
                     original_timeout = session.timeout
-                    session.timeout = 3600  # 1 hour for import process
+                    session.timeout = 3600
                     session.refresh()
                     
-                    # Use the enhanced import function that handles duplicates
                     result = import_credentials_json(path.strip())
                     
-                    # Restore original timeout
                     session.timeout = original_timeout
                     session.refresh()
                     
-                    # The import function already handles all user interaction for duplicates
-                    # Just show final summary based on results
-                    if result.imported > 0 or result.updated > 0:
-                        print(f"\n🎉 Import process completed!")
-                        if result.imported > 0:
-                            print(f"   📥 {result.imported} new credential(s) imported")
-                        if result.updated > 0:
-                            print(f"   🔄 {result.updated} existing credential(s) updated")
-                        if result.skipped > 0:
-                            print(f"   ⏭️  {result.skipped} duplicate(s) skipped")
+                    if result.imported > 0:
+                        print(f"✅ Successfully imported {result.imported} credential(s)!")
                         if result.errors > 0:
                             print(f"   ⚠️  {result.errors} error(s) occurred")
-                    elif result.skipped > 0:
-                        print(f"\n📝 Import completed with {result.skipped} credential(s) skipped.")
-                        print("   No new credentials were added.")
                     elif result.errors > 0:
                         print(f"\n❌ Import failed with {result.errors} error(s).")
                         print("   Please check the file format and try again.")
                     else:
-                        print("\n📝 No credentials were processed.")
+                        print("\n📝 No credentials were imported.")
                         print("   The backup file may be empty or invalid.")
                         
                 except KeyboardInterrupt:
@@ -574,7 +566,7 @@ def handle_timeout_settings(session):
         print("❌ Please enter a valid number.")
 
 def handle_master_password_change(session):
-    """Handle master password change"""
+    """Handle master password change - requires current password + 2FA if enabled"""
     print("\n🔑 Change Master Password")
     print("-" * 25)
     
@@ -592,18 +584,9 @@ def handle_master_password_change(session):
         print("❌ Too many failed attempts.")
         return
     
-    # 2FA verification if enabled
-    if is_totp_enabled():
-        print("🔒 2FA verification required.")
-        for attempt in range(3):
-            code = timed_input("Enter 2FA code: ", session.timeout)
-            if code and verify_totp(code):
-                print("✅ 2FA verified.")
-                break
-            print(f"❌ Invalid 2FA code. {2-attempt} attempts remaining.")
-        else:
-            print("❌ Too many failed 2FA attempts.")
-            return
+    # 2FA verification ONLY for master password change
+    if not verify_2fa_for_critical_operations("master password change", session):
+        return
     
     # Set new password
     while True:
@@ -645,47 +628,30 @@ def handle_2fa_settings(session):
         if choice == "1":
             if not enabled:
                 enable_totp()
+                print("✅ 2FA has been enabled!")
+                print("💡 Use an authenticator app to scan the QR code or enter the secret manually.")
             else:
                 print("ℹ️  2FA is already enabled.")
+                
         elif choice == "2":
             if enabled:
-                if verify_2fa_for_disable(session):
+                # 2FA verification ONLY for disabling 2FA
+                if verify_2fa_for_critical_operations("disable 2FA", session):
                     disable_totp()
+                    print("✅ 2FA has been disabled.")
             else:
                 print("ℹ️  2FA is not enabled.")
+                
         elif choice == "3":
             if verify_master_password():
                 secret = get_or_create_totp_secret()
                 print(f"\n📱 TOTP Secret (scan with authenticator app):")
                 print(f"🔑 {secret}")
                 print("\n💡 Compatible apps: Google Authenticator, Authy, 1Password")
+            else:
+                print("❌ Master password verification failed.")
         else:
             print("❌ Invalid option.")
-
-def verify_2fa_for_disable(session):
-    """Verify 2FA before disabling"""
-    print("🔒 2FA verification required to disable.")
-    for attempt in range(3):
-        code = timed_input("Enter 2FA code: ", session.timeout)
-        if code and verify_totp(code):
-            return True
-        print(f"❌ Invalid code. {2-attempt} attempts remaining.")
-    print("❌ Too many failed attempts.")
-    return False
-
-def verify_master_password():
-    """Verify master password"""
-    import bcrypt
-    with open(MASTER_PASSWORD_FILE, "rb") as f:
-        stored_hash = f.read()
-    
-    for attempt in range(3):
-        password = getpass.getpass("Enter master password: ")
-        if bcrypt.checkpw(password.encode(), stored_hash):
-            return True
-        print(f"❌ Incorrect password. {2-attempt} attempts remaining.")
-    print("❌ Too many failed attempts.")
-    return False
 
 def main():
     """Main application entry point"""

@@ -2,13 +2,13 @@
 """
 Database Management Module
 Handles SQLite database operations for credential storage with encryption.
-Enhanced with duplicate detection and handling.
+Simplified version without duplicate detection for imports.
 """
 
 import sqlite3
 import os
 from contextlib import contextmanager
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 from .config import DATABASE_FILE
 from .utils import set_secure_permissions
 from .crypto_utils import encrypt_data, decrypt_data
@@ -172,8 +172,12 @@ class DatabaseManager:
                 ''', (service, encrypt_data(username), encrypt_data(password)))
                 conn.commit()
         except sqlite3.IntegrityError:
-            # This should be caught by our duplicate check, but just in case
-            raise DuplicateCredentialError(service, username)
+            # This handles database-level constraints
+            if not allow_duplicates:
+                raise DuplicateCredentialError(service, username)
+            # If duplicates are allowed, we could try to update instead
+            # but for simplicity, we'll just ignore the error
+            pass
         except Exception as e:
             raise Exception(f"Failed to add credential: {e}")
     
@@ -364,46 +368,6 @@ class DatabaseManager:
                 return cursor.fetchone()[0]
         except Exception:
             return 0
-    
-    def get_duplicate_analysis(self, credentials_list: List[Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
-        """
-        Analyze a list of credentials for duplicates against existing database.
-        
-        Args:
-            credentials_list (List[Dict]): List of credential dictionaries
-            
-        Returns:
-            Dict: {
-                'new': [list of new credentials],
-                'duplicates': [list of duplicate credentials with existing data]
-            }
-        """
-        analysis = {
-            'new': [],
-            'duplicates': []
-        }
-        
-        for cred in credentials_list:
-            service = cred.get('service', '').strip()
-            username = cred.get('username', '').strip()
-            password = cred.get('password', '').strip()
-            
-            if not all([service, username, password]):
-                continue  # Skip invalid entries
-            
-            if self.credential_exists(service, username):
-                existing = self.get_existing_credential(service, username)
-                analysis['duplicates'].append({
-                    'service': service,
-                    'username': username,
-                    'new_password': password,
-                    'existing_password': existing[2] if existing else '',
-                    'passwords_match': existing and existing[2] == password
-                })
-            else:
-                analysis['new'].append(cred)
-        
-        return analysis
 
 # Global instance for backward compatibility
 _db_manager = DatabaseManager()
